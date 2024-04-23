@@ -1,0 +1,33 @@
+#ifndef HTTPSERVER_HPP
+#define HTTPSERVER_HPP
+
+#include <esp_log.h>
+#include <esp_http_server.h>
+#include <memory>
+#include <cJSON.h>
+#include <mdns.h>
+#include "LedControl.hpp"
+
+class HttpServer
+{
+private:
+    httpd_handle_t _server = NULL;
+    std::shared_ptr<LedControl> _led;
+    std::string _host_name;
+    // esp_err_t _status;
+
+    static const char* _TAG;
+    static esp_err_t LedControlHandler(httpd_req_t*  req);
+    static esp_err_t NotFoundHandler(httpd_req_t* req, httpd_err_code_t error);
+
+public:
+    HttpServer(std::shared_ptr<LedControl> led, std::string host_name = "");
+    ~HttpServer();
+
+    esp_err_t Start();
+    esp_err_t Stop();
+
+    httpd_handle_t GetServer();
+};
+
+#endif
