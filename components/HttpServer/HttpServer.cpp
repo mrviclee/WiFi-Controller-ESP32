@@ -45,7 +45,18 @@ esp_err_t HttpServer::Start()
         .user_ctx = this,
     };
 
+    // Register webocket handlers
+    httpd_uri_t ws = {
+        .uri = "/ws",
+        .method = HTTP_GET,
+        .handler = &WebsocketHandler,
+        .user_ctx = this,
+        .is_websocket = true
+    };
+
     httpd_register_uri_handler(_server, &led_endpoint);
+    httpd_register_uri_handler(_server, &ws);
+
     // httpd_register_uri_handler(_server, &ws);
     httpd_register_err_handler(_server, HTTPD_404_NOT_FOUND, &NotFoundHandler);
     ESP_LOGI(_TAG, "Registered Led Handler");
@@ -279,6 +290,86 @@ esp_err_t HttpServer::LedControlHandler(httpd_req_t* req)
     free(response);
 
     return ESP_OK;
+}
+
+esp_err_t HttpServer::WebsocketHandler(httpd_req_t* req)
+{
+    if (req->method == HTTP_GET)
+    {
+        ESP_LOGI(_TAG, "Handshake done, the new connection was opened");
+        return ESP_OK;
+    }
+
+    // initialize the websocket packet
+    httpd_ws_frame_t ws_packet;
+    memset(&ws_packet, 0, sizeof(httpd_ws_frame_t));
+    ws_packet.type = HTTPD_WS_TYPE_TEXT;
+
+    esp_err_t status = httpd_ws_recv_frame(req, &ws_packet, 0);
+    if (status != ESP_OK)
+    {
+        ESP_LOGI(_TAG, "httpd_ws_recv_frame failed to get frame len with %s", esp_err_to_name(status));
+        return status;
+    }
+
+    ESP_LOGI(_TAG, "frame length is %d", ws_packet.len);
+    auto buffer = std::make_unique<uint8_t>(ws_packet.len + 1);
+    ws_packet.payload = buffer.get();
+
+    status = httpd_ws_recv_frame(req, &ws_packet, ws_packet.len);
+    if (status != ESP_OK)
+    {
+        ESP_LOGE(_TAG, "Failed to get the paylod %s", esp_err_to_name(status));
+        return status;
+    }
+
+    ESP_LOGI(_TAG, "Got packet with message: %s", (char*)ws_packet.payload);
+    ESP_LOGI(_TAG, "Packet Type: %d", ws_packet.type);
+    if (ws_packet.type == HTTPD_WS_TYPE_TEXT && strcmp((char*)ws_packet.payload, "Trigger async") == 0)
+    {
+        return trigger_async_send(req->handle, req);
+    }
+
+    status = httpd_ws_send_frame(req, &ws_packet);
+    if (status != ESP_OK)
+    {
+        ESP_LOGE(_TAG, "httpd_ws_send_frame failed with %s", esp_err_to_name(status));
+    }
+
+    return status;
+}
+
+esp_err_t HttpServer::trigger_async_send(httpd_handle_t handle, httpd_req_t* req)
+{
+    auto resp_arg = std::make_unique<async_resp_arg>();
+    resp_arg->handle = handle,
+        resp_arg->file_descriptor = httpd_req_to_sockfd(req);
+
+    if (httpd_queue_work(handle, wsAsyncSendStatic, resp_arg.get()) != ESP_OK)
+    {
+        return ESP_FAIL;
+    }
+
+    resp_arg.release();
+    return ESP_OK;
+}
+
+void HttpServer::wsAsyncSendStatic(void* arg)
+{
+    auto* resp_arg = static_cast<async_resp_arg*>(arg);
+    wsAsyncSend(resp_arg->handle, resp_arg->file_descriptor);
+    delete resp_arg;
+}
+
+void HttpServer::wsAsyncSend(httpd_handle_t handle, int file_descriptor)
+{
+    const char* data = "Async data";
+    httpd_ws_frame_t ws_packet = {
+        .type = HTTPD_WS_TYPE_TEXT,
+        .payload = (uint8_t*)data,
+        .len = strlen(data)
+    };
+    httpd_ws_send_frame_async(handle, file_descriptor, &ws_packet);
 }
 
 esp_err_t HttpServer::NotFoundHandler(httpd_req_t* req, httpd_err_code_t error)
