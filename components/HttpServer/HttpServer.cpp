@@ -43,6 +43,8 @@ esp_err_t HttpServer::Start()
         .method = HTTP_POST,
         .handler = &LedControlHandler,
         .user_ctx = this,
+        .is_websocket = false,
+        .handle_ws_control_frames = false
     };
 
     // Register webocket handlers
@@ -305,6 +307,7 @@ esp_err_t HttpServer::WebsocketHandler(httpd_req_t* req)
     memset(&ws_packet, 0, sizeof(httpd_ws_frame_t));
     ws_packet.type = HTTPD_WS_TYPE_TEXT;
 
+    // get the length of the webpacket frame
     esp_err_t status = httpd_ws_recv_frame(req, &ws_packet, 0);
     if (status != ESP_OK)
     {
@@ -313,9 +316,12 @@ esp_err_t HttpServer::WebsocketHandler(httpd_req_t* req)
     }
 
     ESP_LOGI(_TAG, "frame length is %d", ws_packet.len);
+
+    // initialize the buffer with the packet size + 1 becuase of the null byte \0
     auto buffer = std::make_unique<uint8_t>(ws_packet.len + 1);
     ws_packet.payload = buffer.get();
 
+    // get the payload data
     status = httpd_ws_recv_frame(req, &ws_packet, ws_packet.len);
     if (status != ESP_OK)
     {
@@ -325,11 +331,6 @@ esp_err_t HttpServer::WebsocketHandler(httpd_req_t* req)
 
     ESP_LOGI(_TAG, "Got packet with message: %s", (char*)ws_packet.payload);
     ESP_LOGI(_TAG, "Packet Type: %d", ws_packet.type);
-    if (ws_packet.type == HTTPD_WS_TYPE_TEXT && strcmp((char*)ws_packet.payload, "Trigger async") == 0)
-    {
-        return trigger_async_send(req->handle, req);
-    }
-
     status = httpd_ws_send_frame(req, &ws_packet);
     if (status != ESP_OK)
     {
@@ -337,39 +338,6 @@ esp_err_t HttpServer::WebsocketHandler(httpd_req_t* req)
     }
 
     return status;
-}
-
-esp_err_t HttpServer::trigger_async_send(httpd_handle_t handle, httpd_req_t* req)
-{
-    auto resp_arg = std::make_unique<async_resp_arg>();
-    resp_arg->handle = handle,
-        resp_arg->file_descriptor = httpd_req_to_sockfd(req);
-
-    if (httpd_queue_work(handle, wsAsyncSendStatic, resp_arg.get()) != ESP_OK)
-    {
-        return ESP_FAIL;
-    }
-
-    resp_arg.release();
-    return ESP_OK;
-}
-
-void HttpServer::wsAsyncSendStatic(void* arg)
-{
-    auto* resp_arg = static_cast<async_resp_arg*>(arg);
-    wsAsyncSend(resp_arg->handle, resp_arg->file_descriptor);
-    delete resp_arg;
-}
-
-void HttpServer::wsAsyncSend(httpd_handle_t handle, int file_descriptor)
-{
-    const char* data = "Async data";
-    httpd_ws_frame_t ws_packet = {
-        .type = HTTPD_WS_TYPE_TEXT,
-        .payload = (uint8_t*)data,
-        .len = strlen(data)
-    };
-    httpd_ws_send_frame_async(handle, file_descriptor, &ws_packet);
 }
 
 esp_err_t HttpServer::NotFoundHandler(httpd_req_t* req, httpd_err_code_t error)
