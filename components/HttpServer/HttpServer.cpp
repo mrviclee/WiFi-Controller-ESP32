@@ -49,9 +49,9 @@ esp_err_t HttpServer::Start()
 
     // Register webocket handlers
     httpd_uri_t ws = {
-        .uri = "/ws",
+        .uri = "/wsled",
         .method = HTTP_GET,
-        .handler = &WebsocketHandler,
+        .handler = &LedWebsocketHandler,
         .user_ctx = this,
         .is_websocket = true
     };
@@ -93,6 +93,7 @@ httpd_handle_t HttpServer::GetServer()
 const char* HttpServer::_TAG = "HttpServer";
 esp_err_t HttpServer::LedControlHandler(httpd_req_t* req)
 {
+    // Null check for the request
     if (!req)
     {
         ESP_LOGI(_TAG, "The request is null");
@@ -112,7 +113,7 @@ esp_err_t HttpServer::LedControlHandler(httpd_req_t* req)
         return ESP_ERR_INVALID_ARG;
     }
 
-    // check header
+    // check header to ensure it includes the content-type
     size_t json_header_value_length = httpd_req_get_hdr_value_len(req, "Content-Type");
     ESP_LOGI(_TAG, "Content-Type header length: %d", json_header_value_length);
     if (json_header_value_length == 0)
@@ -133,7 +134,6 @@ esp_err_t HttpServer::LedControlHandler(httpd_req_t* req)
     }
 
     std::unique_ptr<char[]> json_header_value(new char[json_header_value_length + 1]);
-    // char* json_header_value = new char[json_header_value_length + 1];
     esp_err_t get_json_header_status = httpd_req_get_hdr_value_str(req, "Content-Type", json_header_value.get(), json_header_value_length + 1);
     if (get_json_header_status != ESP_OK)
     {
@@ -153,8 +153,9 @@ esp_err_t HttpServer::LedControlHandler(httpd_req_t* req)
         return ESP_OK;
     }
 
-    // if (strcmp(json_header_value.get(), "application/json") == 0)
     ESP_LOGI(_TAG, "Content-Type value: %s", json_header_value.get());
+
+    // Ensure the content type is json
     if (strcmp(json_header_value.get(), "application/json") != 0)
     {
         ESP_LOGI(_TAG, "The Content-Type is not application/json");
@@ -294,7 +295,7 @@ esp_err_t HttpServer::LedControlHandler(httpd_req_t* req)
     return ESP_OK;
 }
 
-esp_err_t HttpServer::WebsocketHandler(httpd_req_t* req)
+esp_err_t HttpServer::LedWebsocketHandler(httpd_req_t* req)
 {
     if (req->method == HTTP_GET)
     {
@@ -303,40 +304,199 @@ esp_err_t HttpServer::WebsocketHandler(httpd_req_t* req)
     }
 
     // initialize the websocket packet
-    httpd_ws_frame_t ws_packet;
-    memset(&ws_packet, 0, sizeof(httpd_ws_frame_t));
-    ws_packet.type = HTTPD_WS_TYPE_TEXT;
-
+    httpd_ws_frame_t received_ws_packet;
+    memset(&received_ws_packet, 0, sizeof(httpd_ws_frame_t));
+    received_ws_packet.type = HTTPD_WS_TYPE_TEXT;
     // get the length of the webpacket frame
-    esp_err_t status = httpd_ws_recv_frame(req, &ws_packet, 0);
+    esp_err_t status = httpd_ws_recv_frame(req, &received_ws_packet, 0);
     if (status != ESP_OK)
     {
         ESP_LOGI(_TAG, "httpd_ws_recv_frame failed to get frame len with %s", esp_err_to_name(status));
         return status;
     }
 
-    ESP_LOGI(_TAG, "frame length is %d", ws_packet.len);
+    ESP_LOGI(_TAG, "frame length is %d", received_ws_packet.len);
+    if (received_ws_packet.len == 0)
+    {
+        ESP_LOGI(_TAG, "The frame length is 0. Preparing to send error response");
+        cJSON* failed_response;
+        failed_response = cJSON_CreateObject();
+        cJSON_AddNumberToObject(failed_response, "status", 400);
+        cJSON_AddStringToObject(failed_response, "error", "Bad Request");
+        cJSON_AddStringToObject(failed_response, "message", "The message cannot be empty");
+        const char* failed_response_string = cJSON_Print(failed_response);
+        ESP_LOGI(_TAG, "The error is: %s", failed_response_string);
+
+        httpd_ws_frame_t error_response_ws_packet;
+        memset(&error_response_ws_packet, 0, sizeof(httpd_ws_frame_t));
+
+        error_response_ws_packet = {
+            .type = HTTPD_WS_TYPE_TEXT,
+            .payload = (uint8_t*)failed_response_string,
+            .len = strlen(failed_response_string)
+        };
+
+        status = httpd_ws_send_frame(req, &error_response_ws_packet);
+        if (status != ESP_OK)
+        {
+            ESP_LOGE(_TAG, "Failed to send the error response %s", esp_err_to_name(status));
+        }
+
+        cJSON_Delete(failed_response);
+        delete failed_response_string;
+
+        return status;
+    }
 
     // initialize the buffer with the packet size + 1 becuase of the null byte \0
-    auto buffer = std::make_unique<uint8_t>(ws_packet.len + 1);
-    ws_packet.payload = buffer.get();
+    auto buffer = std::make_unique<uint8_t>(received_ws_packet.len + 1);
+    received_ws_packet.payload = buffer.get();
 
     // get the payload data
-    status = httpd_ws_recv_frame(req, &ws_packet, ws_packet.len);
+    status = httpd_ws_recv_frame(req, &received_ws_packet, received_ws_packet.len);
     if (status != ESP_OK)
     {
         ESP_LOGE(_TAG, "Failed to get the paylod %s", esp_err_to_name(status));
         return status;
     }
 
-    ESP_LOGI(_TAG, "Got packet with message: %s", (char*)ws_packet.payload);
-    ESP_LOGI(_TAG, "Packet Type: %d", ws_packet.type);
-    status = httpd_ws_send_frame(req, &ws_packet);
-    if (status != ESP_OK)
+    ESP_LOGI(_TAG, "Got packet with message: %s", (char*)received_ws_packet.payload);
+    ESP_LOGI(_TAG, "Packet Type: %d", received_ws_packet.type);
+
+    if (received_ws_packet.type != HTTPD_WS_TYPE_TEXT)
     {
-        ESP_LOGE(_TAG, "httpd_ws_send_frame failed with %s", esp_err_to_name(status));
+        ESP_LOGI(_TAG, "The websocket packet type is not HTTPD_WS_TYPE_TEXT");
+        cJSON* failed_response;
+        failed_response = cJSON_CreateObject();
+        cJSON_AddNumberToObject(failed_response, "status", 400);
+        cJSON_AddStringToObject(failed_response, "error", "Bad Request");
+        cJSON_AddStringToObject(failed_response, "message", "The type must be HTTPD_WS_TYPE_TEXT");
+        const char* failed_response_string = cJSON_Print(failed_response);
+        ESP_LOGI(_TAG, "The error is: %s", failed_response_string);
+
+        httpd_ws_frame_t error_response_ws_packet;
+        memset(&error_response_ws_packet, 0, sizeof(httpd_ws_frame_t));
+
+        error_response_ws_packet = {
+            .type = HTTPD_WS_TYPE_TEXT,
+            .payload = (uint8_t*)failed_response_string,
+            .len = strlen(failed_response_string)
+        };
+
+        status = httpd_ws_send_frame(req, &error_response_ws_packet);
+        if (status != ESP_OK)
+        {
+            ESP_LOGE(_TAG, "Failed to send the error response %s", esp_err_to_name(status));
+        }
+
+        cJSON_Delete(failed_response);
+        delete failed_response_string;
+
+        return status;
     }
 
+    // Start parsing the message
+    cJSON* recevied_payload_json = cJSON_Parse((char*)buffer.get());
+    cJSON_Delete(recevied_payload_json);
+    // const char* state = NULL;
+
+    // if (cJSON_GetObjectItem(recevied_payload_json, "state"))
+    // {
+    //     state = cJSON_GetObjectItem(recevied_payload_json, "state")->valuestring;
+    // }
+    // free(recevied_payload_json);
+
+    // if (!state)
+    // {
+    //     cJSON* failed_response;
+    //     failed_response = cJSON_CreateObject();
+    //     cJSON_AddNumberToObject(failed_response, "status", 400);
+    //     cJSON_AddStringToObject(failed_response, "error", "Bad Request");
+    //     cJSON_AddStringToObject(failed_response, "message", "Must contain member \"state\"");
+    //     const char* failed_response_string = cJSON_Print(failed_response);
+
+    //     httpd_ws_frame_t error_response_ws_packet;
+    //     memset(&error_response_ws_packet, 0, sizeof(httpd_ws_frame_t));
+
+    //     error_response_ws_packet = {
+    //         .type = HTTPD_WS_TYPE_TEXT,
+    //         .payload = (uint8_t*)failed_response_string,
+    //         .len = strlen(failed_response_string)
+    //     };
+
+    //     status = httpd_ws_send_frame(req, &error_response_ws_packet);
+    //     if (status != ESP_OK)
+    //     {
+    //         ESP_LOGE(_TAG, "Failed to send the error response %s", esp_err_to_name(status));
+    //     }
+
+    //     cJSON_Delete(failed_response);
+    //     delete failed_response_string;
+
+    //     return status;
+    // }
+
+    // auto* http_server = reinterpret_cast<HttpServer*>(req->user_ctx);
+    // // TODO: this should be a critical section. hence it can't be turned on and off at the same time
+    // if (strcmp(state, "on") == 0)
+    // {
+    //     ESP_LOGI(_TAG, "Turn on the led");
+    //     http_server->_led->TurnOn();
+    // }
+    // else if (strcmp(state, "off") == 0)
+    // {
+    //     ESP_LOGI(_TAG, "Turn off the led");
+    //     http_server->_led->TurnOff();
+    // }
+    // else
+    // {
+    //     ESP_LOGI(_TAG, "The state doesn't contain the correct command: %s", state);
+    //     cJSON* failed_response;
+    //     failed_response = cJSON_CreateObject();
+    //     cJSON_AddNumberToObject(failed_response, "status", 400);
+    //     cJSON_AddStringToObject(failed_response, "error", "Bad Request");
+    //     cJSON_AddStringToObject(failed_response, "message", "State doesn't contain the correct command");
+    //     const char* failed_response_string = cJSON_Print(failed_response);
+
+    //     httpd_ws_frame_t error_response_ws_packet;
+    //     memset(&error_response_ws_packet, 0, sizeof(httpd_ws_frame_t));
+
+    //     error_response_ws_packet = {
+    //         .type = HTTPD_WS_TYPE_TEXT,
+    //         .payload = (uint8_t*)failed_response_string,
+    //         .len = strlen(failed_response_string)
+    //     };
+
+    //     status = httpd_ws_send_frame(req, &error_response_ws_packet);
+    //     if (status != ESP_OK)
+    //     {
+    //         ESP_LOGE(_TAG, "Failed to send the error response %s", esp_err_to_name(status));
+    //     }
+
+    //     cJSON_Delete(failed_response);
+    //     delete failed_response_string;
+
+    //     return status;
+    // }
+
+    // cJSON* response;
+    // response = cJSON_CreateObject();
+    // cJSON_AddStringToObject(response, "status", "Success");
+    // const char* respones_string = cJSON_Print(response);
+    const char* respones_string = "test";
+    httpd_ws_frame_t sucess_response_ws_packet;
+    memset(&sucess_response_ws_packet, 0, sizeof(httpd_ws_frame_t));
+
+    sucess_response_ws_packet = {
+        .type = HTTPD_WS_TYPE_TEXT,
+        .payload = (uint8_t*)respones_string,
+        .len = strlen(respones_string),
+    };
+
+    status = httpd_ws_send_frame(req, &sucess_response_ws_packet);
+
+    // cJSON_Delete(response);
+    ESP_LOGI(_TAG, "The status is %s", esp_err_to_name(status));
     return status;
 }
 

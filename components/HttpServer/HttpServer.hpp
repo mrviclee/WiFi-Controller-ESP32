@@ -26,10 +26,7 @@ private:
     static const char* _TAG;
     static esp_err_t LedControlHandler(httpd_req_t*  req);
     static esp_err_t NotFoundHandler(httpd_req_t* req, httpd_err_code_t error);
-    static esp_err_t WebsocketHandler(httpd_req_t* req);
-    static esp_err_t trigger_async_send(httpd_handle_t handle, httpd_req_t* req);
-    static void wsAsyncSendStatic(void* arg);
-    static void wsAsyncSend(httpd_handle_t handle, int file_descriptor);
+    static esp_err_t LedWebsocketHandler(httpd_req_t* req);
 public:
     HttpServer(std::shared_ptr<LedControl> led, std::string host_name = "");
     ~HttpServer();
