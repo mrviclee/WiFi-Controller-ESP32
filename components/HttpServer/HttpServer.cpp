@@ -410,12 +410,7 @@ esp_err_t HttpServer::NotFoundHandler(httpd_req_t* req, httpd_err_code_t error)
     //      "error": "Not Found",
     //      "message": "The requested resource was not found on this server."
     // }
-    cJSON* root;
-    root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "status", 404);
-    cJSON_AddStringToObject(root, "error", "Not Found");
-    cJSON_AddStringToObject(root, "message", "The requested resource was not found on this server.");
-    std::string root_string = cJSON_Print(root);
+    std::string root_string = ConstructFailedJsonResponse(404, "Not Found", "The requested resource was not found on this server.");
 
     // Set the type to application json and header to 404
     // TODO: define the "application/json" and "404 Not Found" as Macros
@@ -423,7 +418,6 @@ esp_err_t HttpServer::NotFoundHandler(httpd_req_t* req, httpd_err_code_t error)
     httpd_resp_set_status(req, "404 Not Found");
     httpd_resp_send(req, root_string.c_str(), HTTPD_RESP_USE_STRLEN);
 
-    cJSON_Delete(root);
     return ESP_FAIL;
 }
 
