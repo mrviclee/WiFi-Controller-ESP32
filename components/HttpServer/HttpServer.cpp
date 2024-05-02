@@ -1,9 +1,8 @@
 #include "HttpServer.hpp"
 
-HttpServer::HttpServer(std::shared_ptr<LedControl> led, std::string host_name) : _led(led), _host_name(host_name)
+HttpServer::HttpServer(httpd_handle_t server, std::shared_ptr<LedControl> led, std::string host_name)
+    : _server(server), _led(led), _host_name(host_name)
 {
-    // ESP_LOGI(_TAG, "led pin: %d", _led);
-    // _status = ESP_ERR_INVALID_STATE;
 }
 
 HttpServer::~HttpServer()
@@ -41,7 +40,7 @@ esp_err_t HttpServer::Start()
     httpd_uri_t led_endpoint = {
         .uri = "/led",
         .method = HTTP_POST,
-        .handler = &LedControlHandler,
+        .handler = &LedControlHttpHandlerStatic,
         .user_ctx = this,
         .is_websocket = false,
         .handle_ws_control_frames = false
@@ -51,7 +50,7 @@ esp_err_t HttpServer::Start()
     httpd_uri_t ws = {
         .uri = "/wsled",
         .method = HTTP_GET,
-        .handler = &LedWebsocketHandler,
+        .handler = &LedControlWebSocketHandlerStatic,
         .user_ctx = this,
         .is_websocket = true
     };
@@ -60,7 +59,7 @@ esp_err_t HttpServer::Start()
     httpd_register_uri_handler(_server, &ws);
 
     // httpd_register_uri_handler(_server, &ws);
-    httpd_register_err_handler(_server, HTTPD_404_NOT_FOUND, &NotFoundHandler);
+    httpd_register_err_handler(_server, HTTPD_404_NOT_FOUND, &NotFoundHandlerStatic);
     ESP_LOGI(_TAG, "Registered Led Handler");
 
     return status;
@@ -91,7 +90,7 @@ httpd_handle_t HttpServer::GetServer()
 // }
 
 const char* HttpServer::_TAG = "HttpServer";
-esp_err_t HttpServer::LedControlHandler(httpd_req_t* req)
+esp_err_t HttpServer::LedControlHttpHandler(httpd_req_t* req)
 {
     // Null check for the request
     if (!req)
@@ -221,81 +220,47 @@ esp_err_t HttpServer::LedControlHandler(httpd_req_t* req)
     // parse the buffer json object
     ESP_LOGI(_TAG, "Start deserializing the object");
     cJSON* root = cJSON_Parse(content_buffer.get());
-    const char* state = NULL;
-    if (cJSON_GetObjectItem(root, "state"))
-    {
-        state = cJSON_GetObjectItem(root, "state")->valuestring;
-    }
-    free(root);
+    std::string parsed_result = "";
+    bool is_parse_successful = ParseStateRequestJson(content_buffer.get(), parsed_result);
 
-    if (!state)
+    if (!is_parse_successful)
     {
-        cJSON* root;
-        root = cJSON_CreateObject();
-        cJSON_AddNumberToObject(root, "status", 400);
-        cJSON_AddStringToObject(root, "error", "Bad Request");
-        cJSON_AddStringToObject(root, "message", "Must contain member \"state\"");
-        const char* root_string = cJSON_Print(root);
+        std::string failed_error_string = ConstructFailedJsonResponse(400, "Bad Request", parsed_result);
 
         esp_err_t set_type_status = httpd_resp_set_type(req, "application/json");
         ESP_LOGI(_TAG, "Set Type Status: %s", esp_err_to_name(set_type_status));
         esp_err_t set_status_result = httpd_resp_set_status(req, "400 Bad Request");
         ESP_LOGI(_TAG, "Set status result: %s", esp_err_to_name(set_status_result));
 
-        esp_err_t send_response_status = httpd_resp_send(req, root_string, HTTPD_RESP_USE_STRLEN);
+        esp_err_t send_response_status = httpd_resp_send(req, failed_error_string.c_str(), HTTPD_RESP_USE_STRLEN);
         ESP_LOGI(_TAG, "Send response status: %s", esp_err_to_name(send_response_status));
 
-        cJSON_Delete(root);
-        return ESP_OK;
+        return send_response_status;
     }
 
-    auto* http_server = reinterpret_cast<HttpServer*>(req->user_ctx);
     // TODO: this should be a critical section. hence it can't be turned on and off at the same time
-    if (strcmp(state, "on") == 0)
+    if (parsed_result.compare("on") == 0)
     {
         ESP_LOGI(_TAG, "Turn on the led");
-        http_server->_led->TurnOn();
+        _led->TurnOn();
     }
-    else if (strcmp(state, "off") == 0)
+    
+    if (parsed_result.compare("off") == 0)
     {
         ESP_LOGI(_TAG, "Turn off the led");
-        http_server->_led->TurnOff();
-    }
-    else
-    {
-        ESP_LOGI(_TAG, "The state doesn't contain the correct command: %s", state);
-        cJSON* root;
-        root = cJSON_CreateObject();
-        cJSON_AddNumberToObject(root, "status", 400);
-        cJSON_AddStringToObject(root, "error", "Bad Request");
-        cJSON_AddStringToObject(root, "message", "State doesn't contain the correct command");
-        const char* root_string = cJSON_Print(root);
-
-        esp_err_t set_type_status = httpd_resp_set_type(req, "application/json");
-        ESP_LOGI(_TAG, "Set Type Status: %s", esp_err_to_name(set_type_status));
-        esp_err_t set_status_result = httpd_resp_set_status(req, "400 Bad Request");
-        ESP_LOGI(_TAG, "Set status result: %s", esp_err_to_name(set_status_result));
-
-        esp_err_t send_response_status = httpd_resp_send(req, root_string, HTTPD_RESP_USE_STRLEN);
-        ESP_LOGI(_TAG, "Send response status: %s", esp_err_to_name(send_response_status));
-        free(root);
-        return ESP_OK;
+        _led->TurnOff();
     }
 
-    cJSON* response;
-    response = cJSON_CreateObject();
-    cJSON_AddStringToObject(response, "status", "Success");
-    const char* respones_string = cJSON_Print(response);
+    std::string response_string = ConstructSuccessResponse();
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_status(req, "200 OK");
-    httpd_resp_send(req, respones_string, HTTPD_RESP_USE_STRLEN);
-    free(response);
+    httpd_resp_send(req, response_string.c_str(), HTTPD_RESP_USE_STRLEN);
 
     return ESP_OK;
 }
 
-esp_err_t HttpServer::LedWebsocketHandler(httpd_req_t* req)
+esp_err_t HttpServer::LedControlWebsocketHandler(httpd_req_t* req)
 {
     if (req->method == HTTP_GET)
     {
@@ -381,13 +346,14 @@ esp_err_t HttpServer::LedWebsocketHandler(httpd_req_t* req)
     }
 
     // Start parsing the message
-    cJSON* recevied_payload_json = cJSON_Parse((char*)buffer.get());
-    ESP_LOGI(_TAG, "Parsed the json sucessuflly");
+    std::string parsed_result = "";
+    bool is_json_parse_sucessful = ParseStateRequestJson((char*)buffer.get(), parsed_result);
 
-    // Failed to parse
-    if (!recevied_payload_json)
+    ESP_LOGI(_TAG, "Parsed the json request. Status: %d, Parsed_result: %s", is_json_parse_sucessful, parsed_result.c_str());
+
+    if (!is_json_parse_sucessful)
     {
-        std::string failed_response_string = ConstructFailedJsonResponse(400, "Bad Request", "The request message must be a valid json");
+        std::string failed_response_string = ConstructFailedJsonResponse(400, "Bad Request", parsed_result);
 
         httpd_ws_frame_t error_response_ws_packet;
         memset(&error_response_ws_packet, 0, sizeof(httpd_ws_frame_t));
@@ -407,89 +373,17 @@ esp_err_t HttpServer::LedWebsocketHandler(httpd_req_t* req)
         return status;
     }
 
-    cJSON* state_item = cJSON_GetObjectItem(recevied_payload_json, "state");
-    ESP_LOGI(_TAG, "Got the state item");
-    if (!state_item || state_item->type != cJSON_String)
-    {
-        ESP_LOGE(_TAG, "\"state\" is not a valid string");
-        std::string failed_response_string = ConstructFailedJsonResponse(400, "Bad Request", "State member must contain valid command \"on\" or \"off\"");
-        httpd_ws_frame_t error_response_ws_packet;
-        memset(&error_response_ws_packet, 0, sizeof(httpd_ws_frame_t));
-
-        error_response_ws_packet = {
-            .type = HTTPD_WS_TYPE_TEXT,
-            .payload = (uint8_t*)failed_response_string.c_str(),
-            .len = failed_response_string.length()
-        };
-
-        status = httpd_ws_send_frame(req, &error_response_ws_packet);
-        if (status != ESP_OK)
-        {
-            ESP_LOGE(_TAG, "Failed to send the error response %s", esp_err_to_name(status));
-        }
-
-        return status;
-    }
-
-    const char* state = state_item->valuestring;
-    ESP_LOGI(_TAG, "The state item is a string");
-    // cJSON_Delete(state_item);
-    // cJSON_Delete(recevied_payload_json);
-    ESP_LOGI(_TAG, "After freeing items");
-    if (!state)
-    {
-        std::string failed_response_string = ConstructFailedJsonResponse(400, "Bad Request", "Must contain member \"state\"");
-        httpd_ws_frame_t error_response_ws_packet;
-        memset(&error_response_ws_packet, 0, sizeof(httpd_ws_frame_t));
-
-        error_response_ws_packet = {
-            .type = HTTPD_WS_TYPE_TEXT,
-            .payload = (uint8_t*)failed_response_string.c_str(),
-            .len = failed_response_string.length()
-        };
-
-        status = httpd_ws_send_frame(req, &error_response_ws_packet);
-        if (status != ESP_OK)
-        {
-            ESP_LOGE(_TAG, "Failed to send the error response %s", esp_err_to_name(status));
-        }
-
-        return status;
-    }
-
-    auto* http_server = reinterpret_cast<HttpServer*>(req->user_ctx);
     // // TODO: this should be a critical section. hence it can't be turned on and off at the same time
-    if (strcmp(state, "on") == 0)
+    if (parsed_result.compare("on") == 0)
     {
         ESP_LOGI(_TAG, "Turn on the led");
-        http_server->_led->TurnOn();
+        _led->TurnOn();
     }
-    else if (strcmp(state, "off") == 0)
+
+    if (parsed_result.compare("off") == 0)
     {
         ESP_LOGI(_TAG, "Turn off the led");
-        http_server->_led->TurnOff();
-    }
-    else
-    {
-        ESP_LOGI(_TAG, "The state doesn't contain the correct command: %s", state);
-        std::string failed_response_string = ConstructFailedJsonResponse(400, "Bad Request", "State doesn't contain the correct command");
-
-        httpd_ws_frame_t error_response_ws_packet;
-        memset(&error_response_ws_packet, 0, sizeof(httpd_ws_frame_t));
-
-        error_response_ws_packet = {
-            .type = HTTPD_WS_TYPE_TEXT,
-            .payload = (uint8_t*)failed_response_string.c_str(),
-            .len = failed_response_string.length()
-        };
-
-        status = httpd_ws_send_frame(req, &error_response_ws_packet);
-        if (status != ESP_OK)
-        {
-            ESP_LOGE(_TAG, "Failed to send the error response %s", esp_err_to_name(status));
-        }
-
-        return status;
+        _led->TurnOff();
     }
 
     std::string success_response_string = ConstructSuccessResponse();
@@ -533,7 +427,27 @@ esp_err_t HttpServer::NotFoundHandler(httpd_req_t* req, httpd_err_code_t error)
     return ESP_FAIL;
 }
 
-std::string HttpServer::ConstructFailedJsonResponse(uint16_t error_status, std::string error_code, std::string error_message)
+/* Static Handler Wrapper */
+esp_err_t HttpServer::LedControlHttpHandlerStatic(httpd_req_t* req)
+{
+    auto* http_server = reinterpret_cast<HttpServer*>(req->user_ctx);
+    return http_server->LedControlHttpHandler(req);
+}
+
+esp_err_t HttpServer::NotFoundHandlerStatic(httpd_req_t* req, httpd_err_code_t error)
+{
+    auto* http_server = reinterpret_cast<HttpServer*>(req->user_ctx);
+    return http_server->NotFoundHandler(req, error);
+}
+
+esp_err_t HttpServer::LedControlWebSocketHandlerStatic(httpd_req_t* req)
+{
+    auto* http_server = reinterpret_cast<HttpServer*>(req->user_ctx);
+    return http_server->LedControlWebsocketHandler(req);
+}
+
+/* Helper Methods Implementation */
+std::string HttpServer::ConstructFailedJsonResponse(const uint16_t& error_status, const std::string& error_code, const std::string& error_message)
 {
     cJSON* root;
     root = cJSON_CreateObject();
@@ -555,4 +469,38 @@ std::string HttpServer::ConstructSuccessResponse()
 
     cJSON_Delete(response);
     return respones_string;
+}
+
+bool HttpServer::ParseStateRequestJson(const char* request, std::string& output_parsed_state)
+{
+    cJSON* recevied_payload_json = cJSON_Parse(request);
+    ESP_LOGI(_TAG, "Parsed the json sucessuflly");
+
+    // Failed to parse
+    if (!recevied_payload_json)
+    {
+        ESP_LOGW(_TAG, "Malformed Json");
+        output_parsed_state = "The request message must be a valid json";
+        return false;
+    }
+
+    cJSON* state_item = cJSON_GetObjectItem(recevied_payload_json, "state");
+
+    if (!state_item || state_item->type != cJSON_String)
+    {
+        ESP_LOGW(_TAG, "The state item cannot be parsed");
+        output_parsed_state = "Must contain member \"state\"";
+        return false;
+    }
+    ESP_LOGI(_TAG, "Got the state item");
+
+    const char* state = state_item->valuestring;
+    if (strcmp(state, "on") != 0 && strcmp(state, "off") != 0)
+    {
+        output_parsed_state = "State doesn't contain the correct command";
+        return false;
+    }
+
+    output_parsed_state = state;
+    return true;
 }

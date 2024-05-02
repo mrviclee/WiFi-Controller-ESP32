@@ -36,7 +36,8 @@ void app_main(void)
     ESP_LOGI("Main", "The GPIO_NUM_26: %d", GPIO_NUM_26);
     std::shared_ptr<LedControl> led = std::make_shared<LedControl>(GPIO_NUM_26);
     std::string host_name = "Baobao";
-    HttpServer server(led, host_name);
+    httpd_handle_t server_handle = NULL;
+    HttpServer server(server_handle, led, host_name);
     esp_err_t start = server.Start();
 
     while (server.GetServer())
