@@ -93,23 +93,19 @@ const char* HttpServer::_TAG = "HttpServer";
 esp_err_t HttpServer::LedControlHttpHandler(httpd_req_t* req)
 {
     // Null check for the request
+    ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_resp_set_type(req, "application/json"));
+
+    esp_err_t status = ESP_OK;
     if (!req)
     {
         ESP_LOGI(_TAG, "The request is null");
 
-        cJSON* root;
-        root = cJSON_CreateObject();
-        cJSON_AddNumberToObject(root, "status", 400);
-        cJSON_AddStringToObject(root, "error", "Bad Request");
-        cJSON_AddStringToObject(root, "message", "Invalid Request");
-        const char* root_string = cJSON_Print(root);
+        std::string root_string = ConstructFailedJsonResponse(400, "Bad Request", "Invalid Request");
 
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, root_string, HTTPD_RESP_USE_STRLEN);
+        ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_resp_set_status(req, "400 Bad Request"));
+        status = httpd_resp_send(req, root_string.c_str(), HTTPD_RESP_USE_STRLEN);
 
-        cJSON_Delete(root);
-        return ESP_ERR_INVALID_ARG;
+        return status;
     }
 
     // check header to ensure it includes the content-type
@@ -117,39 +113,32 @@ esp_err_t HttpServer::LedControlHttpHandler(httpd_req_t* req)
     ESP_LOGI(_TAG, "Content-Type header length: %d", json_header_value_length);
     if (json_header_value_length == 0)
     {
-        cJSON* root;
-        root = cJSON_CreateObject();
-        cJSON_AddNumberToObject(root, "status", 400);
-        cJSON_AddStringToObject(root, "error", "Bad Request");
-        cJSON_AddStringToObject(root, "message", "Must have header Content-Type");
-        const char* root_string = cJSON_Print(root);
+        std::string failed_response_string = ConstructFailedJsonResponse(400, "Bad Request", "Must have header Content-Type");
 
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, root_string, HTTPD_RESP_USE_STRLEN);
+        ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_resp_set_status(req, "400 Bad Request"));
+        status = httpd_resp_send(req, failed_response_string.c_str(), HTTPD_RESP_USE_STRLEN);
 
-        cJSON_Delete(root);
-        return ESP_OK;
+        return status;
     }
 
     std::unique_ptr<char[]> json_header_value(new char[json_header_value_length + 1]);
-    esp_err_t get_json_header_status = httpd_req_get_hdr_value_str(req, "Content-Type", json_header_value.get(), json_header_value_length + 1);
+    esp_err_t get_json_header_status =
+        httpd_req_get_hdr_value_str(
+            req,
+            "Content-Type",
+            json_header_value.get(),
+            json_header_value_length + 1
+        );
+
     if (get_json_header_status != ESP_OK)
     {
         ESP_LOGI(_TAG, "Cannot get the header Content-Type: Error Code: %s", esp_err_to_name(get_json_header_status));
-        cJSON* root;
-        root = cJSON_CreateObject();
-        cJSON_AddNumberToObject(root, "status", 400);
-        cJSON_AddStringToObject(root, "error", "Bad Request");
-        cJSON_AddStringToObject(root, "message", "Must have header Content-Type");
-        const char* root_string = cJSON_Print(root);
+        std::string failed_response_string = ConstructFailedJsonResponse(400, "Bad Request", "Must have header Content-Type");
 
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, root_string, HTTPD_RESP_USE_STRLEN);
+        ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_resp_set_status(req, "400 Bad Request"));
+        status = httpd_resp_send(req, failed_response_string.c_str(), HTTPD_RESP_USE_STRLEN);
 
-        cJSON_Delete(root);
-        return ESP_OK;
+        return status;
     }
 
     ESP_LOGI(_TAG, "Content-Type value: %s", json_header_value.get());
@@ -158,23 +147,13 @@ esp_err_t HttpServer::LedControlHttpHandler(httpd_req_t* req)
     if (strcmp(json_header_value.get(), "application/json") != 0)
     {
         ESP_LOGI(_TAG, "The Content-Type is not application/json");
-        cJSON* root;
-        root = cJSON_CreateObject();
-        cJSON_AddNumberToObject(root, "status", 400);
-        cJSON_AddStringToObject(root, "error", "Bad Request");
-        cJSON_AddStringToObject(root, "message", "Type must be application json");
-        const char* root_string = cJSON_Print(root);
+        std::string failed_response_string = ConstructFailedJsonResponse(400, "Bad Request", "Type must be application json");
 
-        esp_err_t set_type_status = httpd_resp_set_type(req, "application/json");
-        ESP_LOGI(_TAG, "Set Type Status: %s", esp_err_to_name(set_type_status));
-        esp_err_t set_status_result = httpd_resp_set_status(req, "400 Bad Request");
-        ESP_LOGI(_TAG, "Set status result: %s", esp_err_to_name(set_status_result));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_resp_set_status(req, "400 Bad Request"));
 
-        esp_err_t send_response_status = httpd_resp_send(req, root_string, HTTPD_RESP_USE_STRLEN);
-        ESP_LOGI(_TAG, "Send response status: %s", esp_err_to_name(send_response_status));
+        status = httpd_resp_send(req, failed_response_string.c_str(), HTTPD_RESP_USE_STRLEN);
 
-        cJSON_Delete(root);
-        return ESP_OK;
+        return status;
     }
 
     // check buffer length
@@ -198,23 +177,13 @@ esp_err_t HttpServer::LedControlHttpHandler(httpd_req_t* req)
         }
         //TODO: should timeout be internal server error?
 
-        cJSON* root;
-        root = cJSON_CreateObject();
-        cJSON_AddNumberToObject(root, "status", error_status);
-        cJSON_AddStringToObject(root, "error", error_code.c_str());
-        cJSON_AddStringToObject(root, "message", error_message.c_str());
-        const char* root_string = cJSON_Print(root);
+        std::string failed_response_string = ConstructFailedJsonResponse(error_status, error_code, error_message);
 
-        esp_err_t set_type_status = httpd_resp_set_type(req, "application/json");
-        ESP_LOGI(_TAG, "Set Type Status: %s", esp_err_to_name(set_type_status));
-        esp_err_t set_status_result = httpd_resp_set_status(req, "500 Internal Server Error");
-        ESP_LOGI(_TAG, "Set status result: %s", esp_err_to_name(set_status_result));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_resp_set_status(req, "500 Internal Server Error"));
 
-        esp_err_t send_response_status = httpd_resp_send(req, root_string, HTTPD_RESP_USE_STRLEN);
-        ESP_LOGI(_TAG, "Send response status: %s", esp_err_to_name(send_response_status));
+        status = httpd_resp_send(req, failed_response_string.c_str(), HTTPD_RESP_USE_STRLEN);
 
-        cJSON_Delete(root);
-        return ESP_OK;
+        return status;
     }
 
     // parse the buffer json object
@@ -227,15 +196,10 @@ esp_err_t HttpServer::LedControlHttpHandler(httpd_req_t* req)
     {
         std::string failed_error_string = ConstructFailedJsonResponse(400, "Bad Request", parsed_result);
 
-        esp_err_t set_type_status = httpd_resp_set_type(req, "application/json");
-        ESP_LOGI(_TAG, "Set Type Status: %s", esp_err_to_name(set_type_status));
-        esp_err_t set_status_result = httpd_resp_set_status(req, "400 Bad Request");
-        ESP_LOGI(_TAG, "Set status result: %s", esp_err_to_name(set_status_result));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_resp_set_status(req, "400 Bad Request"));
+        status = httpd_resp_send(req, failed_error_string.c_str(), HTTPD_RESP_USE_STRLEN);
 
-        esp_err_t send_response_status = httpd_resp_send(req, failed_error_string.c_str(), HTTPD_RESP_USE_STRLEN);
-        ESP_LOGI(_TAG, "Send response status: %s", esp_err_to_name(send_response_status));
-
-        return send_response_status;
+        return status;
     }
 
     // TODO: this should be a critical section. hence it can't be turned on and off at the same time
@@ -244,7 +208,7 @@ esp_err_t HttpServer::LedControlHttpHandler(httpd_req_t* req)
         ESP_LOGI(_TAG, "Turn on the led");
         _led->TurnOn();
     }
-    
+
     if (parsed_result.compare("off") == 0)
     {
         ESP_LOGI(_TAG, "Turn off the led");
@@ -253,11 +217,10 @@ esp_err_t HttpServer::LedControlHttpHandler(httpd_req_t* req)
 
     std::string response_string = ConstructSuccessResponse();
 
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_status(req, "200 OK");
-    httpd_resp_send(req, response_string.c_str(), HTTPD_RESP_USE_STRLEN);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_resp_set_status(req, "200 OK"));
+    status = httpd_resp_send(req, response_string.c_str(), HTTPD_RESP_USE_STRLEN);
 
-    return ESP_OK;
+    return status;
 }
 
 esp_err_t HttpServer::LedControlWebsocketHandler(httpd_req_t* req)
