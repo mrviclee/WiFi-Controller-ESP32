@@ -21,12 +21,16 @@ private:
         httpd_handle_t handle;
         int file_descriptor;
     };
-    
 
     static const char* _TAG;
+
     static esp_err_t LedControlHandler(httpd_req_t*  req);
     static esp_err_t NotFoundHandler(httpd_req_t* req, httpd_err_code_t error);
     static esp_err_t LedWebsocketHandler(httpd_req_t* req);
+
+    // Helper Methods
+    static std::string ConstructFailedJsonResponse(uint16_t error_status, std::string error_code, std::string error_message);
+    static std::string ConstructSuccessResponse();
 public:
     HttpServer(std::shared_ptr<LedControl> led, std::string host_name = "");
     ~HttpServer();
