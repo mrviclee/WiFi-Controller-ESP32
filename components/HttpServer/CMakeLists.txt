@@ -6,4 +6,5 @@ idf_component_register(
             esp_https_server
             esp_http_server
             json
-            mdns)
+            mdns
+            EMBED_TXTFILES "${CMAKE_CURRENT_SOURCE_DIR}/WebPage/index.html" "${CMAKE_CURRENT_SOURCE_DIR}/WebPage/websocket.js")

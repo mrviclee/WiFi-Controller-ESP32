@@ -1,5 +1,12 @@
 #include "HttpServer.hpp"
 
+extern const uint8_t index_html_start[] asm("_binary_index_html_start");
+extern const uint8_t index_html_end[] asm("_binary_index_html_end");
+
+extern const uint8_t websocket_js_start[] asm("_binary_websocket_js_start");
+extern const uint8_t websocket_js_end[]   asm("_binary_websocket_js_end");
+
+
 HttpServer::HttpServer(httpd_handle_t server, std::shared_ptr<LedControl> led, std::string host_name)
     : _server(server), _led(led), _host_name(host_name)
 {
@@ -32,11 +39,14 @@ esp_err_t HttpServer::Start()
     _server = NULL;
     httpd_config_t server_config = HTTPD_DEFAULT_CONFIG();
     server_config.lru_purge_enable = true;
+    server_config.open_fn = OnOpenConnectionStatic;
+    server_config.close_fn = OnCloseConnectionStatic;
+    server_config.global_user_ctx = this;
+    server_config.uri_match_fn = httpd_uri_match_wildcard;
 
     ESP_LOGI(_TAG, "Start server");
     esp_err_t status = httpd_start(&_server, &server_config);
 
-    // Register url handlers
     httpd_uri_t led_endpoint = {
         .uri = "/led",
         .method = HTTP_POST,
@@ -55,8 +65,19 @@ esp_err_t HttpServer::Start()
         .is_websocket = true
     };
 
+    // Register url handlers
+    httpd_uri_t root = {
+        .uri = "/*",
+        .method = HTTP_GET,
+        .handler = &RootHandlerStatic,
+        .user_ctx = this,
+        .is_websocket = false,
+        .handle_ws_control_frames = false
+    };
+
     httpd_register_uri_handler(_server, &led_endpoint);
     httpd_register_uri_handler(_server, &ws);
+    httpd_register_uri_handler(_server, &root);
 
     // httpd_register_uri_handler(_server, &ws);
     httpd_register_err_handler(_server, HTTPD_404_NOT_FOUND, &NotFoundHandlerStatic);
@@ -84,12 +105,40 @@ httpd_handle_t HttpServer::GetServer()
     return _server;
 }
 
-// esp_err_t HttpServer::GetServerStatus()
-// {
-//     return _status;
-// }
-
 const char* HttpServer::_TAG = "HttpServer";
+
+esp_err_t HttpServer::RootHandler(httpd_req_t* req)
+{
+    if (strcmp(req->uri, "/") == 0 || strcmp(req->uri, "/index.html") == 0)
+    {
+        // Serve HTML
+        httpd_resp_set_type(req, "text/html");
+        size_t html_len = index_html_end - index_html_start;
+        if (index_html_start[html_len - 1] == '\0')
+        {
+            html_len--;  // Adjust length to exclude the null terminator
+        }
+        httpd_resp_send(req, (const char*)index_html_start, html_len);
+    }
+    else if (strcmp(req->uri, "/websocket.js") == 0)
+    {
+        // Serve JavaScript
+        httpd_resp_set_type(req, "application/javascript");
+        size_t js_len = websocket_js_end - websocket_js_start;
+        if (websocket_js_start[js_len - 1] == '\0')
+        {
+            js_len--;  // Adjust length to exclude the null terminator
+        }
+        httpd_resp_send(req, (const char*)websocket_js_start, js_len);
+    }
+    else
+    {
+        // Handle not found
+        httpd_resp_send_404(req);
+    }
+    return ESP_OK;
+}
+
 esp_err_t HttpServer::LedControlHttpHandler(httpd_req_t* req)
 {
     // Null check for the request
@@ -215,7 +264,7 @@ esp_err_t HttpServer::LedControlHttpHandler(httpd_req_t* req)
         _led->TurnOff();
     }
 
-    std::string response_string = ConstructSuccessResponse();
+    std::string response_string = ConstructCurrentSstateMessage("on");
 
     ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_resp_set_status(req, "200 OK"));
     status = httpd_resp_send(req, response_string.c_str(), HTTPD_RESP_USE_STRLEN);
@@ -225,9 +274,16 @@ esp_err_t HttpServer::LedControlHttpHandler(httpd_req_t* req)
 
 esp_err_t HttpServer::LedControlWebsocketHandler(httpd_req_t* req)
 {
+    esp_err_t status;
+    int current_led_state = _led->GetState();
+    std::string current_led_state_string = current_led_state == 1 ? "on" : "off";
+
     if (req->method == HTTP_GET)
     {
         ESP_LOGI(_TAG, "Handshake done, the new connection was opened");
+
+        std::string esponse_string = ConstructCurrentSstateMessage(current_led_state_string);
+        status = SendWebsocketTextMessage(req, esponse_string);
         return ESP_OK;
     }
 
@@ -237,10 +293,16 @@ esp_err_t HttpServer::LedControlWebsocketHandler(httpd_req_t* req)
     received_ws_packet.type = HTTPD_WS_TYPE_TEXT;
 
     // get the length of the webpacket frame
-    esp_err_t status = httpd_ws_recv_frame(req, &received_ws_packet, 0);
+    status = httpd_ws_recv_frame(req, &received_ws_packet, 0);
     if (status != ESP_OK)
     {
-        ESP_LOGI(_TAG, "httpd_ws_recv_frame failed to get frame len with %s", esp_err_to_name(status));
+        ESP_LOGW(_TAG, "httpd_ws_recv_frame failed to get frame len with %s", esp_err_to_name(status));
+
+        int file_descriptor = httpd_req_to_sockfd(req);
+        RemoveClient(file_descriptor);
+
+        ESP_LOGW(_TAG, "Remove the client id: %d from the list", file_descriptor);
+
         return status;
     }
 
@@ -251,16 +313,7 @@ esp_err_t HttpServer::LedControlWebsocketHandler(httpd_req_t* req)
         std::string failed_response_string = ConstructFailedJsonResponse(400, "Bad Request", "The message cannot be empty");
         ESP_LOGI(_TAG, "The error is: %s", failed_response_string.c_str());
 
-        httpd_ws_frame_t error_response_ws_packet;
-        memset(&error_response_ws_packet, 0, sizeof(httpd_ws_frame_t));
-
-        error_response_ws_packet = {
-            .type = HTTPD_WS_TYPE_TEXT,
-            .payload = (uint8_t*)failed_response_string.c_str(),
-            .len = failed_response_string.length()
-        };
-
-        status = httpd_ws_send_frame(req, &error_response_ws_packet);
+        status = SendWebsocketTextMessage(req, failed_response_string);
         if (status != ESP_OK)
         {
             ESP_LOGE(_TAG, "Failed to send the error response %s", esp_err_to_name(status));
@@ -290,16 +343,7 @@ esp_err_t HttpServer::LedControlWebsocketHandler(httpd_req_t* req)
         std::string failed_response_string = ConstructFailedJsonResponse(400, "Bad Request", "The type must be HTTPD_WS_TYPE_TEXT");
         ESP_LOGI(_TAG, "The error is: %s", failed_response_string.c_str());
 
-        httpd_ws_frame_t error_response_ws_packet;
-        memset(&error_response_ws_packet, 0, sizeof(httpd_ws_frame_t));
-
-        error_response_ws_packet = {
-            .type = HTTPD_WS_TYPE_TEXT,
-            .payload = (uint8_t*)failed_response_string.c_str(),
-            .len = failed_response_string.length()
-        };
-
-        status = httpd_ws_send_frame(req, &error_response_ws_packet);
+        status = SendWebsocketTextMessage(req, failed_response_string);
         if (status != ESP_OK)
         {
             ESP_LOGE(_TAG, "Failed to send the error response %s", esp_err_to_name(status));
@@ -317,22 +361,7 @@ esp_err_t HttpServer::LedControlWebsocketHandler(httpd_req_t* req)
     if (!is_json_parse_sucessful)
     {
         std::string failed_response_string = ConstructFailedJsonResponse(400, "Bad Request", parsed_result);
-
-        httpd_ws_frame_t error_response_ws_packet;
-        memset(&error_response_ws_packet, 0, sizeof(httpd_ws_frame_t));
-
-        error_response_ws_packet = {
-            .type = HTTPD_WS_TYPE_TEXT,
-            .payload = (uint8_t*)failed_response_string.c_str(),
-            .len = failed_response_string.length()
-        };
-
-        status = httpd_ws_send_frame(req, &error_response_ws_packet);
-        if (status != ESP_OK)
-        {
-            ESP_LOGE(_TAG, "Failed to send the error response %s", esp_err_to_name(status));
-        }
-
+        status = SendWebsocketTextMessage(req, failed_response_string);
         return status;
     }
 
@@ -349,19 +378,11 @@ esp_err_t HttpServer::LedControlWebsocketHandler(httpd_req_t* req)
         _led->TurnOff();
     }
 
-    std::string success_response_string = ConstructSuccessResponse();
-    httpd_ws_frame_t success_response_ws_packet;
-    memset(&success_response_ws_packet, 0, sizeof(httpd_ws_frame_t));
-
-    success_response_ws_packet = {
-        .type = HTTPD_WS_TYPE_TEXT,
-        .payload = (uint8_t*)success_response_string.c_str(),
-        .len = success_response_string.length()
-    };
-
-    status = httpd_ws_send_frame(req, &success_response_ws_packet);
-
-    ESP_LOGI(_TAG, "The status is %s", esp_err_to_name(status));
+    current_led_state = _led->GetState();
+    current_led_state_string = current_led_state == 1 ? "on" : "off";
+    std::string success_response_string = ConstructCurrentSstateMessage(current_led_state_string);
+    status = SendWebsocketTextMessage(req, success_response_string);
+    BroadCastMessage();
     return status;
 }
 
@@ -384,7 +405,90 @@ esp_err_t HttpServer::NotFoundHandler(httpd_req_t* req, httpd_err_code_t error)
     return ESP_FAIL;
 }
 
+void HttpServer::BroadCastMessage()
+{
+    std::string state = _led->GetState() == 1 ? "on" : "off";
+    std::string message = ConstructCurrentSstateMessage(state);
+
+    httpd_ws_frame_t ws_packet;
+    memset(&ws_packet, 0, sizeof(httpd_ws_frame_t));
+
+    ws_packet = {
+        .type = HTTPD_WS_TYPE_TEXT,
+        .payload = (uint8_t*)message.c_str(),
+        .len = message.length()
+    };
+
+    for (std::unordered_map<int, int>::iterator it = _clients.begin(); it != _clients.end(); it++)
+    {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_ws_send_frame_async(_server, it->first, &ws_packet));
+    }
+}
+
+esp_err_t HttpServer::OnOpenConnection(int socket_file_descriptor)
+{
+    ESP_LOGI(_TAG, "A new connection is made ID: %d", socket_file_descriptor);
+    AddClient(socket_file_descriptor, socket_file_descriptor);
+    return ESP_OK;
+}
+
+esp_err_t HttpServer::OnCloseConnection(int socket_file_descriptor)
+{
+    ESP_LOGI(_TAG, "The connection is closed id: %d", socket_file_descriptor);
+    RemoveClient(socket_file_descriptor);
+    close(socket_file_descriptor);
+    return ESP_OK;
+}
+
+void HttpServer::AddClient(const int& client_id, const int& file_descriptor)
+{
+    std::lock_guard<std::mutex> lock(_clientsMutex);
+    std::unordered_map<int, int>::const_iterator found_client = _clients.find(client_id);
+    if (found_client != _clients.end())
+    {
+        ESP_LOGW(_TAG, "The client id: %d was already in the client list", client_id);
+    }
+
+    _clients[client_id] = file_descriptor;
+}
+
+void HttpServer::RemoveClient(const int& client_id)
+{
+    std::lock_guard<std::mutex> lock(_clientsMutex);
+    std::unordered_map<int, int>::const_iterator found_client = _clients.find(client_id);
+    if (found_client == _clients.end())
+    {
+        ESP_LOGW(_TAG, "The client id: %d is not in the client list", client_id);
+        return;
+    }
+
+    _clients.erase(client_id);
+}
+
+esp_err_t HttpServer::SendWebsocketTextMessage(httpd_req_t* req, const std::string& message)
+{
+    httpd_ws_frame_t ws_packet;
+    memset(&ws_packet, 0, sizeof(httpd_ws_frame_t));
+
+    ws_packet = {
+        .type = HTTPD_WS_TYPE_TEXT,
+        .payload = (uint8_t*)message.c_str(),
+        .len = message.length()
+    };
+
+    esp_err_t status = httpd_ws_send_frame(req, &ws_packet);
+
+    ESP_LOGI(_TAG, "The status is %s", esp_err_to_name(status));
+    return status;
+}
+
 /* Static Handler Wrapper */
+esp_err_t HttpServer::RootHandlerStatic(httpd_req_t* req)
+{
+    auto* http_server = reinterpret_cast<HttpServer*>(req->user_ctx);
+    return http_server->RootHandler(req);
+}
+
 esp_err_t HttpServer::LedControlHttpHandlerStatic(httpd_req_t* req)
 {
     auto* http_server = reinterpret_cast<HttpServer*>(req->user_ctx);
@@ -403,6 +507,18 @@ esp_err_t HttpServer::LedControlWebSocketHandlerStatic(httpd_req_t* req)
     return http_server->LedControlWebsocketHandler(req);
 }
 
+esp_err_t HttpServer::OnOpenConnectionStatic(httpd_handle_t server_handle, int socket_file_descriptor)
+{
+    auto* http_server = reinterpret_cast<HttpServer*>(httpd_get_global_user_ctx(server_handle));
+    return http_server->OnOpenConnection(socket_file_descriptor);
+}
+
+void HttpServer::OnCloseConnectionStatic(httpd_handle_t server_handle, int socket_file_descriptor)
+{
+    auto* http_server = reinterpret_cast<HttpServer*>(httpd_get_global_user_ctx(server_handle));
+    http_server->OnCloseConnection(socket_file_descriptor);
+}
+
 /* Helper Methods Implementation */
 std::string HttpServer::ConstructFailedJsonResponse(const uint16_t& error_status, const std::string& error_code, const std::string& error_message)
 {
@@ -417,11 +533,11 @@ std::string HttpServer::ConstructFailedJsonResponse(const uint16_t& error_status
     return root_string;
 }
 
-std::string HttpServer::ConstructSuccessResponse()
+std::string HttpServer::ConstructCurrentSstateMessage(const std::string& current_state)
 {
     cJSON* response;
     response = cJSON_CreateObject();
-    cJSON_AddStringToObject(response, "status", "Success");
+    cJSON_AddStringToObject(response, "status", current_state.c_str());
     std::string respones_string = cJSON_Print(response);
 
     cJSON_Delete(response);

@@ -3,5 +3,5 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES LedControl
              WifiControl
-             HttpServer)
-    # REQUIRES esp_wifi)
+             HttpServer
+             )
