@@ -1,5 +1,12 @@
 #include "HttpServer.hpp"
 
+extern const uint8_t index_html_start[] asm("_binary_index_html_start");
+extern const uint8_t index_html_end[] asm("_binary_index_html_end");
+
+extern const uint8_t websocket_js_start[] asm("_binary_websocket_js_start");
+extern const uint8_t websocket_js_end[]   asm("_binary_websocket_js_end");
+
+
 HttpServer::HttpServer(httpd_handle_t server, std::shared_ptr<LedControl> led, std::string host_name)
     : _server(server), _led(led), _host_name(host_name)
 {
@@ -35,11 +42,11 @@ esp_err_t HttpServer::Start()
     server_config.open_fn = OnOpenConnectionStatic;
     server_config.close_fn = OnCloseConnectionStatic;
     server_config.global_user_ctx = this;
+    server_config.uri_match_fn = httpd_uri_match_wildcard;
 
     ESP_LOGI(_TAG, "Start server");
     esp_err_t status = httpd_start(&_server, &server_config);
 
-    // Register url handlers
     httpd_uri_t led_endpoint = {
         .uri = "/led",
         .method = HTTP_POST,
@@ -58,8 +65,19 @@ esp_err_t HttpServer::Start()
         .is_websocket = true
     };
 
+    // Register url handlers
+    httpd_uri_t root = {
+        .uri = "/*",
+        .method = HTTP_GET,
+        .handler = &RootHandlerStatic,
+        .user_ctx = this,
+        .is_websocket = false,
+        .handle_ws_control_frames = false
+    };
+
     httpd_register_uri_handler(_server, &led_endpoint);
     httpd_register_uri_handler(_server, &ws);
+    httpd_register_uri_handler(_server, &root);
 
     // httpd_register_uri_handler(_server, &ws);
     httpd_register_err_handler(_server, HTTPD_404_NOT_FOUND, &NotFoundHandlerStatic);
@@ -88,6 +106,39 @@ httpd_handle_t HttpServer::GetServer()
 }
 
 const char* HttpServer::_TAG = "HttpServer";
+
+esp_err_t HttpServer::RootHandler(httpd_req_t* req)
+{
+    if (strcmp(req->uri, "/") == 0 || strcmp(req->uri, "/index.html") == 0)
+    {
+        // Serve HTML
+        httpd_resp_set_type(req, "text/html");
+        size_t html_len = index_html_end - index_html_start;
+        if (index_html_start[html_len - 1] == '\0')
+        {
+            html_len--;  // Adjust length to exclude the null terminator
+        }
+        httpd_resp_send(req, (const char*)index_html_start, html_len);
+    }
+    else if (strcmp(req->uri, "/websocket.js") == 0)
+    {
+        // Serve JavaScript
+        httpd_resp_set_type(req, "application/javascript");
+        size_t js_len = websocket_js_end - websocket_js_start;
+        if (websocket_js_start[js_len - 1] == '\0')
+        {
+            js_len--;  // Adjust length to exclude the null terminator
+        }
+        httpd_resp_send(req, (const char*)websocket_js_start, js_len);
+    }
+    else
+    {
+        // Handle not found
+        httpd_resp_send_404(req);
+    }
+    return ESP_OK;
+}
+
 esp_err_t HttpServer::LedControlHttpHandler(httpd_req_t* req)
 {
     // Null check for the request
@@ -432,6 +483,12 @@ esp_err_t HttpServer::SendWebsocketTextMessage(httpd_req_t* req, const std::stri
 }
 
 /* Static Handler Wrapper */
+esp_err_t HttpServer::RootHandlerStatic(httpd_req_t* req)
+{
+    auto* http_server = reinterpret_cast<HttpServer*>(req->user_ctx);
+    return http_server->RootHandler(req);
+}
+
 esp_err_t HttpServer::LedControlHttpHandlerStatic(httpd_req_t* req)
 {
     auto* http_server = reinterpret_cast<HttpServer*>(req->user_ctx);

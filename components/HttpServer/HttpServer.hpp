@@ -22,6 +22,7 @@ private:
 
     static const char* _TAG;
 
+    esp_err_t RootHandler(httpd_req_t* req);
     esp_err_t LedControlHttpHandler(httpd_req_t* req);
     esp_err_t NotFoundHandler(httpd_req_t* req, httpd_err_code_t error);
     esp_err_t LedControlWebsocketHandler(httpd_req_t* req);
@@ -41,6 +42,7 @@ public:
     esp_err_t Start();
     esp_err_t Stop();
 
+    static esp_err_t RootHandlerStatic(httpd_req_t* req);
     static esp_err_t LedControlHttpHandlerStatic(httpd_req_t* req);
     static esp_err_t NotFoundHandlerStatic(httpd_req_t* req, httpd_err_code_t error);
     static esp_err_t LedControlWebSocketHandlerStatic(httpd_req_t* req);
