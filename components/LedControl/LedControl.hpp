@@ -26,6 +26,10 @@ class LedControl {
     void TurnOn();
     void TurnOff();
 
+    /// @brief Get the current LED's state. true => on false => off
+    /// @return 
+    int GetState();
+
     private:
     gpio_num_t _led_pin_number;
 };
