@@ -28,7 +28,7 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(nvs_flash_return);
 
-    WifiControl wifi_control("TMOBILE-1B6A", "79fdsrc8hz3");
+    WifiControl wifi_control("", "");
     WifiControl::Initialize();
     // wifi_control.ConnectInStationMode();
     wifi_control.ConnectInStationMode();
